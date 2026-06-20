@@ -11,7 +11,11 @@ include(helpers)
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+find_package(obs-frontend-api REQUIRED)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+    OBS::libobs
+    OBS::obs-frontend-api
+)
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   src/plugin-main.c
