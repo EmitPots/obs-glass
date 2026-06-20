@@ -11,6 +11,7 @@
 #include <util/dstr.h>
 #include <util/threading.h>
 #include <plugin-support.h>
+#include <obs-frontend-api.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,6 +47,7 @@ struct glass_source {
 	gs_eparam_t *p_uv_size;
 	gs_eparam_t *p_pos_x;
 	gs_eparam_t *p_pos_y;
+	gs_eparam_t *p_rotation_z;
 	gs_eparam_t *p_transparent_bg;
 	gs_eparam_t *p_shape_width;
 	gs_eparam_t *p_shape_height;
@@ -94,7 +96,9 @@ struct glass_source {
 	gs_eparam_t *p_liquid_seed;
 
 	/* Settings-Werte (aus update gelesen) */
+	bool use_current_scene;
 	float pos_x, pos_y;
+	float rotation_z;
 	bool transparent_bg;
 	float shape_width, shape_height;
 	float corner_radius, feathering;
@@ -149,6 +153,7 @@ static void cache_params(struct glass_source *ctx)
 	ctx->p_uv_size              = GP("uv_size");
 	ctx->p_pos_x                = GP("LensPositionX");
 	ctx->p_pos_y                = GP("LensPositionY");
+	ctx->p_rotation_z			= GP("RotationZ");
 	ctx->p_transparent_bg       = GP("TransparentBackground");
 	ctx->p_shape_width          = GP("shape_width");
 	ctx->p_shape_height         = GP("shape_height");
@@ -321,12 +326,19 @@ static void glass_source_update(void *data, obs_data_t *settings)
 	struct glass_source *ctx = data;
 
 	/* Hintergrund-Source aktualisieren */
-	const char *target_name = obs_data_get_string(settings, "target_source");
+	const char *target_name =
+   		 obs_data_get_string(settings, "target_source");
+
+	ctx->use_current_scene =
+   		 target_name &&
+  		  strcmp(target_name, "__CURRENT_SCENE__") == 0;
+
 	glass_source_update_target_name(ctx, target_name);
 
 	/* Alle Glass-Parameter einlesen */
 	ctx->pos_x                = (float)obs_data_get_double(settings, "pos_x");
 	ctx->pos_y                = (float)obs_data_get_double(settings, "pos_y");
+	ctx->rotation_z           =(float)obs_data_get_double(settings, "rotation_z");
 	ctx->transparent_bg       = obs_data_get_bool(settings, "transparent_bg");
 	ctx->shape_width          = (float)obs_data_get_double(settings, "shape_width");
 	ctx->shape_height         = (float)obs_data_get_double(settings, "shape_height");
@@ -392,6 +404,7 @@ static void glass_source_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "target_source", "");
 	obs_data_set_default_double(settings, "pos_x",                960.0);
 	obs_data_set_default_double(settings, "pos_y",                540.0);
+	obs_data_set_default_double(settings,"rotation_z",              0.0);
 	obs_data_set_default_bool(  settings, "transparent_bg",       true);
 	obs_data_set_default_double(settings, "shape_width",          400.0);
 	obs_data_set_default_double(settings, "shape_height",         400.0);
@@ -508,8 +521,17 @@ static void populate_sources_filtered(obs_property_t *list, const char *filter,
 				      const char *skip_name)
 {
 	obs_property_list_clear(list);
-	obs_property_list_add_string(list, obs_module_text("None"), "");
-
+	
+	obs_property_list_add_string(
+    	list,
+    	obs_module_text("None"),
+    	"");
+	
+	obs_property_list_add_string(
+   		 list,
+    	"Current Scene",
+    	"__CURRENT_SCENE__");
+	
 	struct name_list names = {NULL, 0, 0};
 	obs_enum_sources(collect_source_name, &names);
 	obs_enum_scenes(collect_scene_name, &names);
@@ -786,6 +808,7 @@ static obs_properties_t *glass_source_properties(void *data)
 	current_props = position_props;
 	SLIDER_F("pos_x",         "PositionX",          -10000.0, 10000.0, 1.0);
 	SLIDER_F("pos_y",         "PositionY",          -10000.0, 10000.0, 1.0);
+	SLIDER_F("rotation_z",    "RotationZ",          -1440.0,  1440.0,  1.0);
 	obs_properties_add_button2(current_props, "center_x", TEXT("CenterX"),
 				   on_center_x_clicked, ctx);
 	obs_properties_add_button2(current_props, "center_y", TEXT("CenterY"),
@@ -948,14 +971,20 @@ static uint32_t glass_source_get_height(void *data)
 
 static obs_source_t *glass_source_get_target(struct glass_source *ctx)
 {
-	obs_source_t *target = NULL;
+    if (ctx->use_current_scene) {
+        return obs_frontend_get_current_scene();
+    }
 
-	pthread_mutex_lock(&ctx->target_mutex);
-	if (ctx->target_weak)
-		target = obs_weak_source_get_source(ctx->target_weak);
-	pthread_mutex_unlock(&ctx->target_mutex);
+    obs_source_t *target = NULL;
 
-	return target;
+    pthread_mutex_lock(&ctx->target_mutex);
+
+    if (ctx->target_weak)
+        target = obs_weak_source_get_source(ctx->target_weak);
+
+    pthread_mutex_unlock(&ctx->target_mutex);
+
+    return target;
 }
 
 static void glass_source_enum_active_sources(void *data,
@@ -1052,7 +1081,9 @@ static void glass_source_render(void *data, gs_effect_t *effect)
 	struct vec4 clear_color = {0};
 	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
 	gs_ortho(0.0f, (float)bg_w, 0.0f, (float)bg_h, -100.0f, 100.0f);
+	obs_source_set_enabled(ctx->source, false);
 	obs_source_video_render(bg);
+	obs_source_set_enabled(ctx->source, true);
 	gs_texrender_end(ctx->texrender);
 	gs_blend_state_pop();
 
@@ -1137,13 +1168,14 @@ static void glass_source_render(void *data, gs_effect_t *effect)
 	gs_effect_set_float(ctx->p_liquid_speed,         ctx->liquid_speed);
 	gs_effect_set_float(ctx->p_liquid_depth,         ctx->liquid_depth);
 	gs_effect_set_float(ctx->p_liquid_seed,          ctx->liquid_seed);
+	gs_effect_set_float(ctx->p_rotation_z,			 ctx->rotation_z);
 
 	/* Alpha-Blending fuer korrekte Transparenz */
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
 	while (gs_effect_loop(ctx->effect, "Draw"))
-		gs_draw_sprite(NULL, 0, ctx->width, ctx->height);
+    	gs_draw_sprite(NULL, 0, ctx->width, ctx->height);
 
 	gs_blend_state_pop();
 	ctx->rendering = false;
