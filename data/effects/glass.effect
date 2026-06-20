@@ -66,6 +66,7 @@ uniform float  LiquidStrength;
 uniform float  LiquidSpeed;
 uniform float  LiquidDepth;
 uniform float  LiquidSeed;
+uniform float  RotationZ;
 
 // =============================================================================
 // SAMPLER
@@ -187,8 +188,18 @@ float4 PSGlass(VertDataOut v_in) : TARGET
 
     // 1. Form-SDF
     float2 p = (uv * uv_size) - pos;
+
+    // Rotation Z (Form only)
+    float a = radians(RotationZ);
+    float s = sin(a);
+    float c = cos(a);
+
+    float2 p_rot;
+    p_rot.x = p.x * c - p.y * s;
+    p_rot.y = p.x * s + p.y * c;
+
     float r = max(corner_radius, 0.0);
-    float sdf = get_sdf(p, dim, r, 2.0);
+    float sdf = get_sdf(p_rot, dim, r, 2.0);
 
     // 2. Weichzeichnung -> Form-Alpha
     float feather = max(FeatheringPx, 0.0);
@@ -198,14 +209,14 @@ float4 PSGlass(VertDataOut v_in) : TARGET
     // 3. Winkel vorberechnen (nur wenn benoetigt)
     float angle = 0.0;
     if (EnableDirectionalGlow || EnableDirectionalInnerGlow) {
-        angle = degrees(atan2(p.y, p.x));
+        angle = degrees(atan2(p_rot.y, p_rot.x));
         if (angle < 0.0) angle += 360.0;
     }
 
     // 4. Schlagschatten
     float4 col_shadow = float4(0.0, 0.0, 0.0, 0.0);
     if (EnableDropShadow && ShadowOpacity > 0.0) {
-        float2 p_sh = p - float2(ShadowOffsetX, ShadowOffsetY);
+        float2 p_sh = p_rot - float2(ShadowOffsetX, ShadowOffsetY);
         float sdf_sh = get_sdf(p_sh, dim, r, 2.0);
         float sh_blur = max(ShadowBlur, 0.001);
         float val = exp(-(max(sdf_sh, 0.0) * max(sdf_sh, 0.0)) / (2.0 * sh_blur * sh_blur));
